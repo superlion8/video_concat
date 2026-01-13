@@ -66,30 +66,66 @@ def concat(req: ConcatReq, request: Request):
 
     out_file = workdir / "out.mp4"
 
-    # Build ffmpeg command using concat filter (handles different formats properly)
-    # -i for each input file
-    input_args = []
-    filter_parts = []
+    # Step 1: Preprocess each video to ensure consistent format
+    # - Add silent audio if missing
+    # - Normalize to 1280x720, 30fps
+    preprocessed = []
     for i, fp in enumerate(local_files):
-        input_args.extend(["-i", str(fp)])
-        filter_parts.append(f"[{i}:v:0][{i}:a:0]")
-    
-    # Concat filter: scale all to same resolution, then concat
-    n = len(local_files)
-    filter_complex = f"{''.join(filter_parts)}concat=n={n}:v=1:a=1[outv][outa]"
-    
-    cmd = [
-        "ffmpeg", "-y",
-        *input_args,
-        "-filter_complex", filter_complex,
-        "-map", "[outv]", "-map", "[outa]",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
+        prep_file = workdir / f"prep_{i}.mp4"
+        # Use a filter that:
+        # 1. Scales video to 1280x720 (pad to keep aspect ratio)
+        # 2. Sets fps to 30
+        # 3. Adds silent audio if no audio stream exists
+        prep_cmd = [
+            "ffmpeg", "-y", "-i", str(fp),
+            "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-filter_complex",
+            "[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30,format=yuv420p[v];"
+            "[0:a]aresample=44100[a]",
+            "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            "-shortest",
+            str(prep_file)
+        ]
+        print(f"Preprocessing video {i}: {' '.join(prep_cmd)}")
+        p = subprocess.run(prep_cmd, capture_output=True, text=True)
+        
+        # If preprocessing failed (likely no audio), try without audio mapping
+        if p.returncode != 0:
+            print(f"First attempt failed, trying with generated silent audio: {p.stderr[-200:]}")
+            prep_cmd2 = [
+                "ffmpeg", "-y", "-i", str(fp),
+                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-filter_complex",
+                "[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30,format=yuv420p[v]",
+                "-map", "[v]", "-map", "1:a",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k",
+                "-shortest",
+                str(prep_file)
+            ]
+            p2 = subprocess.run(prep_cmd2, capture_output=True, text=True)
+            if p2.returncode != 0:
+                print(f"Preprocessing failed for {fp}: {p2.stderr}")
+                raise HTTPException(status_code=500, detail=f"Failed to preprocess video {i}: {p2.stderr[-300:]}")
+        
+        preprocessed.append(prep_file)
+
+    # Step 2: Create list file for concat demuxer
+    list_txt = workdir / "list.txt"
+    with open(list_txt, "w") as f:
+        for fp in preprocessed:
+            f.write(f"file '{fp.absolute()}'\n")
+
+    # Step 3: Concat using demuxer (now all files have same format)
+    concat_cmd = [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_txt),
+        "-c", "copy",
         str(out_file)
     ]
-    
-    print(f"Running ffmpeg: {' '.join(cmd)}")
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    print(f"Running concat: {' '.join(concat_cmd)}")
+    p = subprocess.run(concat_cmd, capture_output=True, text=True)
     
     if p.returncode != 0:
         print(f"Concat failed: {p.stderr}")
