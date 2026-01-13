@@ -68,23 +68,23 @@ def concat(req: ConcatReq, request: Request):
 
     # Step 1: Preprocess each video to ensure consistent format
     # - Add silent audio if missing
-    # - Normalize to 1280x720, 30fps
+    # - Keep original resolution, just normalize fps and pixel format
     preprocessed = []
     for i, fp in enumerate(local_files):
         prep_file = workdir / f"prep_{i}.mp4"
         # Use a filter that:
-        # 1. Scales video to 1280x720 (pad to keep aspect ratio)
+        # 1. Keeps original resolution (no scaling)
         # 2. Sets fps to 30
         # 3. Adds silent audio if no audio stream exists
         prep_cmd = [
             "ffmpeg", "-y", "-i", str(fp),
             "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
             "-filter_complex",
-            "[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30,format=yuv420p[v];"
+            "[0:v]fps=30,format=yuv420p[v];"
             "[0:a]aresample=44100[a]",
             "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-c:a", "aac", "-b:a", "128k",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+            "-c:a", "aac", "-b:a", "192k",
             "-shortest",
             str(prep_file)
         ]
@@ -98,10 +98,10 @@ def concat(req: ConcatReq, request: Request):
                 "ffmpeg", "-y", "-i", str(fp),
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                 "-filter_complex",
-                "[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30,format=yuv420p[v]",
+                "[0:v]fps=30,format=yuv420p[v]",
                 "-map", "[v]", "-map", "1:a",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k",
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-c:a", "aac", "-b:a", "192k",
                 "-shortest",
                 str(prep_file)
             ]
