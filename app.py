@@ -72,42 +72,36 @@ def concat(req: ConcatReq, request: Request):
     preprocessed = []
     for i, fp in enumerate(local_files):
         prep_file = workdir / f"prep_{i}.mp4"
-        # Use a filter that:
-        # 1. Keeps original resolution (no scaling)
-        # 2. Sets fps to 30
-        # 3. Adds silent audio if no audio stream exists
+        
+        # Try simple re-encode first (works for most videos with audio)
         prep_cmd = [
             "ffmpeg", "-y", "-i", str(fp),
-            "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-            "-filter_complex",
-            "[0:v]fps=30,format=yuv420p[v];"
-            "[0:a]aresample=44100[a]",
-            "-map", "[v]", "-map", "[a]",
+            "-vf", "fps=30,format=yuv420p",
             "-c:v", "libx264", "-preset", "medium", "-crf", "18",
             "-c:a", "aac", "-b:a", "192k",
-            "-shortest",
             str(prep_file)
         ]
-        print(f"Preprocessing video {i}: {' '.join(prep_cmd)}")
+        print(f"Preprocessing video {i} (attempt 1): {' '.join(prep_cmd)}")
         p = subprocess.run(prep_cmd, capture_output=True, text=True)
         
-        # If preprocessing failed (likely no audio), try without audio mapping
+        # If failed (likely no audio), add silent audio track
         if p.returncode != 0:
-            print(f"First attempt failed, trying with generated silent audio: {p.stderr[-200:]}")
+            print(f"First attempt failed: {p.stderr[-300:]}")
+            print(f"Trying with silent audio...")
             prep_cmd2 = [
-                "ffmpeg", "-y", "-i", str(fp),
+                "ffmpeg", "-y",
+                "-i", str(fp),
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                "-filter_complex",
-                "[0:v]fps=30,format=yuv420p[v]",
-                "-map", "[v]", "-map", "1:a",
+                "-vf", "fps=30,format=yuv420p",
                 "-c:v", "libx264", "-preset", "medium", "-crf", "18",
                 "-c:a", "aac", "-b:a", "192k",
+                "-map", "0:v:0", "-map", "1:a:0",
                 "-shortest",
                 str(prep_file)
             ]
             p2 = subprocess.run(prep_cmd2, capture_output=True, text=True)
             if p2.returncode != 0:
-                print(f"Preprocessing failed for {fp}: {p2.stderr}")
+                print(f"Second attempt also failed: {p2.stderr}")
                 raise HTTPException(status_code=500, detail=f"Failed to preprocess video {i}: {p2.stderr[-300:]}")
         
         preprocessed.append(prep_file)
