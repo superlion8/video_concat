@@ -74,70 +74,82 @@ def concat(req: ConcatReq, request: Request):
 
     out_file = workdir / "out.mp4"
 
-    # Step 1: Preprocess each video to ensure consistent format
-    # - Add silent audio if missing
-    # - Keep original resolution, just normalize fps and pixel format
-    preprocessed = []
-    for i, fp in enumerate(local_files):
-        prep_file = workdir / f"prep_{i}.mp4"
-        
-        # Check if video has audio stream using ffprobe
-        probe_cmd = ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(fp)]
-        probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
-        has_audio = "audio" in probe_result.stdout
-        print(f"Video {i} has audio: {has_audio}")
-        
-        if has_audio:
-            # Video has audio, simple re-encode
-            prep_cmd = [
-                "ffmpeg", "-y", "-i", str(fp),
-                "-vf", "fps=30,format=yuv420p",
-                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-                "-c:a", "aac", "-b:a", "192k",
-                str(prep_file)
-            ]
-        else:
-            # No audio, add silent audio track
-            prep_cmd = [
-                "ffmpeg", "-y",
-                "-i", str(fp),
-                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                "-vf", "fps=30,format=yuv420p",
-                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-                "-c:a", "aac", "-b:a", "192k",
-                "-map", "0:v:0", "-map", "1:a:0",
-                "-shortest",
-                str(prep_file)
-            ]
-        
-        print(f"Preprocessing video {i}: {' '.join(prep_cmd)}")
-        p = subprocess.run(prep_cmd, capture_output=True, text=True)
-        
-        if p.returncode != 0:
-            print(f"FFmpeg stderr: {p.stderr}")
-            print(f"FFmpeg stdout: {p.stdout}")
-            raise HTTPException(status_code=500, detail=f"Failed to preprocess video {i}: {p.stderr[-400:]}")
-        
-        preprocessed.append(prep_file)
-
-    # Step 2: Create list file for concat demuxer
+    # Try direct concat first (fast, works if all videos have same format)
     list_txt = workdir / "list.txt"
     with open(list_txt, "w") as f:
-        for fp in preprocessed:
+        for fp in local_files:
             f.write(f"file '{fp.absolute()}'\n")
 
-    # Step 3: Concat using demuxer (now all files have same format)
+    # Attempt 1: Direct copy (fast, preserves quality)
     concat_cmd = [
         "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_txt),
         "-c", "copy",
         str(out_file)
     ]
-    print(f"Running concat: {' '.join(concat_cmd)}")
+    print(f"Attempt 1 - Direct copy: {' '.join(concat_cmd)}")
     p = subprocess.run(concat_cmd, capture_output=True, text=True)
     
     if p.returncode != 0:
-        print(f"Concat failed: {p.stderr}")
-        raise HTTPException(status_code=500, detail=f"Concat failed: {p.stderr[-500:]}")
+        print(f"Direct copy failed: {p.stderr[-500:]}")
+        print("Attempting re-encode...")
+        
+        # Attempt 2: Re-encode all videos
+        # First preprocess each video
+        preprocessed = []
+        for i, fp in enumerate(local_files):
+            prep_file = workdir / f"prep_{i}.mp4"
+            
+            # Check if video has audio stream
+            probe_cmd = ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(fp)]
+            probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+            has_audio = "audio" in probe_result.stdout
+            print(f"Video {i} has audio: {has_audio}")
+            
+            if has_audio:
+                prep_cmd = [
+                    "ffmpeg", "-y", "-i", str(fp),
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                    "-c:a", "aac", "-b:a", "192k",
+                    str(prep_file)
+                ]
+            else:
+                prep_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", str(fp),
+                    "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-t", "300",  # Max 5 min per video for safety
+                    str(prep_file)
+                ]
+            
+            print(f"Preprocessing video {i}: {' '.join(prep_cmd)}")
+            p2 = subprocess.run(prep_cmd, capture_output=True, text=True)
+            
+            if p2.returncode != 0:
+                print(f"FFmpeg stderr: {p2.stderr}")
+                raise HTTPException(status_code=500, detail=f"Failed to preprocess video {i}: {p2.stderr[-400:]}")
+            
+            preprocessed.append(prep_file)
+        
+        # Concat preprocessed files
+        prep_list_txt = workdir / "prep_list.txt"
+        with open(prep_list_txt, "w") as f:
+            for fp in preprocessed:
+                f.write(f"file '{fp.absolute()}'\n")
+        
+        concat_cmd2 = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(prep_list_txt),
+            "-c", "copy",
+            str(out_file)
+        ]
+        print(f"Concat re-encoded files: {' '.join(concat_cmd2)}")
+        p3 = subprocess.run(concat_cmd2, capture_output=True, text=True)
+        
+        if p3.returncode != 0:
+            print(f"Final concat failed: {p3.stderr}")
+            raise HTTPException(status_code=500, detail=f"Concat failed: {p3.stderr[-400:]}")
 
     # Construct the download URL
     # request.base_url usually ends with /
