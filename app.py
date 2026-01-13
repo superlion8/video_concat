@@ -64,36 +64,36 @@ def concat(req: ConcatReq, request: Request):
         download(url, str(fp))
         local_files.append(fp)
 
-    list_txt = workdir / "list.txt"
-    with open(list_txt, "w") as f:
-        for fp in local_files:
-            # escaping quotes in filename if needed, but uuid/simple names are safe
-            f.write(f"file '{fp.absolute()}'\n")
-
     out_file = workdir / "out.mp4"
 
-    # 1. Try safe copy (only works if codecs/resolutions match)
-    p = subprocess.run(
-        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_txt), "-c", "copy", str(out_file)],
-        capture_output=True, text=True
-    )
+    # Build ffmpeg command using concat filter (handles different formats properly)
+    # -i for each input file
+    input_args = []
+    filter_parts = []
+    for i, fp in enumerate(local_files):
+        input_args.extend(["-i", str(fp)])
+        filter_parts.append(f"[{i}:v:0][{i}:a:0]")
     
-    # 2. Fallback to re-encoding if copy fails
+    # Concat filter: scale all to same resolution, then concat
+    n = len(local_files)
+    filter_complex = f"{''.join(filter_parts)}concat=n={n}:v=1:a=1[outv][outa]"
+    
+    cmd = [
+        "ffmpeg", "-y",
+        *input_args,
+        "-filter_complex", filter_complex,
+        "-map", "[outv]", "-map", "[outa]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        str(out_file)
+    ]
+    
+    print(f"Running ffmpeg: {' '.join(cmd)}")
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    
     if p.returncode != 0:
-        print(f"Copy concat failed, re-encoding. Error: {p.stderr}")
-        p2 = subprocess.run(
-            [
-                "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_txt),
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k", 
-                str(out_file)
-            ],
-            capture_output=True, text=True
-        )
-        if p2.returncode != 0:
-            print(f"Re-encode failed: {p2.stderr}")
-            # Clean up on failure? Maybe/Maybe not
-            raise HTTPException(status_code=500, detail=f"Concat failed: {p2.stderr[-500:]}")
+        print(f"Concat failed: {p.stderr}")
+        raise HTTPException(status_code=500, detail=f"Concat failed: {p.stderr[-500:]}")
 
     # Construct the download URL
     # request.base_url usually ends with /
